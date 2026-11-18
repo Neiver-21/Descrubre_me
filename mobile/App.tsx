@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import * as Location from 'expo-location';
+import * as SecureStore from 'expo-secure-store';
 import {
   ActivityIndicator,
   Pressable,
@@ -10,10 +12,11 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import AuthScreen, { type AuthUser } from './AuthScreen';
 
 const API_BASE_URL = 'https://descrubreme-production.up.railway.app/api/v1';
 
-type TabId = 'cities' | 'places' | 'categories';
+type TabId = 'nearby' | 'cities' | 'places' | 'categories';
 
 type City = {
   id: number;
@@ -30,6 +33,9 @@ type Place = {
   name: string;
   description?: string | null;
   address?: string | null;
+  city_name?: string;
+  category_name?: string | null;
+  distance_km?: number | string | null;
 };
 
 type Category = {
@@ -45,10 +51,13 @@ type Tab = {
 };
 
 const TABS: Tab[] = [
+  { id: 'nearby', label: 'Cerca' },
   { id: 'cities', label: 'Ciudades' },
   { id: 'places', label: 'Lugares' },
   { id: 'categories', label: 'Categorías' },
 ];
+
+const NEARBY_RADII = [1, 5, 10, 25, 50];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -73,6 +82,13 @@ function isCategory(value: unknown): value is Category {
     Number.isSafeInteger(value.id) &&
     typeof value.name === 'string' &&
     typeof value.slug === 'string';
+}
+
+function isAuthUser(value: unknown): value is AuthUser {
+  return isRecord(value) &&
+    Number.isSafeInteger(value.id) &&
+    typeof value.name === 'string' &&
+    typeof value.email === 'string';
 }
 
 async function fetchList<T>(
@@ -101,13 +117,82 @@ function normalize(value: string): string {
 }
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<TabId>('cities');
+  const [activeTab, setActiveTab] = useState<TabId>('nearby');
   const [search, setSearch] = useState('');
+  const [sessionToken, setSessionToken] = useState<string | null>(null);
+  const [sessionUser, setSessionUser] = useState<AuthUser | null>(null);
+  const [sessionLoading, setSessionLoading] = useState(true);
+  const [sessionError, setSessionError] = useState('');
+  const [signOutError, setSignOutError] = useState('');
   const [cities, setCities] = useState<City[]>([]);
   const [places, setPlaces] = useState<Place[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [nearbyPlaces, setNearbyPlaces] = useState<Place[]>([]);
+  const [nearbyRadius, setNearbyRadius] = useState(10);
+  const [nearbyLoading, setNearbyLoading] = useState(false);
+  const [nearbyError, setNearbyError] = useState('');
+  const [nearbyHasSearched, setNearbyHasSearched] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+
+    async function restoreSession() {
+      try {
+        const token = await SecureStore.getItemAsync('authToken');
+        if (!token) {
+          return;
+        }
+
+        const response = await fetch(`${API_BASE_URL}/auth/me`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (response.status === 401) {
+          await SecureStore.deleteItemAsync('authToken');
+          return;
+        }
+        if (!response.ok) {
+          throw new Error(`El servidor respondió con el código ${response.status}.`);
+        }
+
+        const payload: unknown = await response.json();
+        if (!isRecord(payload) || payload.status !== 'success' ||
+            !isRecord(payload.data) || !isAuthUser(payload.data.user)) {
+          throw new Error('El servidor devolvió una sesión no válida.');
+        }
+        if (active) {
+          setSessionToken(token);
+          setSessionUser(payload.data.user);
+        }
+      } catch {
+        if (active) {
+          setSessionError('No se pudo validar la sesión. Revisa tu conexión e inicia sesión de nuevo.');
+        }
+      } finally {
+        if (active) {
+          setSessionLoading(false);
+        }
+      }
+    }
+
+    void restoreSession();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const acceptSession = useCallback(async (token: string, user: AuthUser) => {
+    await SecureStore.setItemAsync('authToken', token);
+    setSessionToken(token);
+    setSessionUser(user);
+    setSessionError('');
+    setSignOutError('');
+    setNearbyHasSearched(false);
+    setNearbyPlaces([]);
+    setNearbyError('');
+    setActiveTab('nearby');
+  }, []);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -148,8 +233,91 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    void loadData();
-  }, [loadData]);
+    if (sessionToken) {
+      void loadData();
+    }
+  }, [loadData, sessionToken]);
+
+  const loadNearby = useCallback(async () => {
+    if (!sessionToken) {
+      return;
+    }
+
+    setNearbyLoading(true);
+    setNearbyError('');
+    setNearbyHasSearched(true);
+    try {
+      const permission = await Location.requestForegroundPermissionsAsync();
+      if (permission.status !== 'granted') {
+        throw new Error('Para encontrar lugares cercanos, permite el acceso a la ubicación.');
+      }
+
+      const position = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.Balanced,
+      });
+      const response = await fetch(`${API_BASE_URL}/places/nearby`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${sessionToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          latitude: position.coords.latitude,
+          longitude: position.coords.longitude,
+          radius_km: nearbyRadius,
+        }),
+      });
+      const payload: unknown = await response.json();
+      if (response.status === 401) {
+        await SecureStore.deleteItemAsync('authToken');
+        setSessionToken(null);
+        setSessionUser(null);
+        setSessionError('Tu sesión venció. Inicia sesión nuevamente.');
+        throw new Error('Tu sesión venció. Inicia sesión nuevamente.');
+      }
+      if (!response.ok) {
+        const message = isRecord(payload) && typeof payload.message === 'string'
+          ? payload.message
+          : `El servidor respondió con el código ${response.status}.`;
+        throw new Error(message);
+      }
+      if (!isRecord(payload) || payload.status !== 'success' || !Array.isArray(payload.data) ||
+          !payload.data.every(isPlace)) {
+        throw new Error('El servidor devolvió lugares que la aplicación no reconoce.');
+      }
+      setNearbyPlaces(payload.data);
+    } catch (reason) {
+      setNearbyPlaces([]);
+      setNearbyError(reason instanceof Error
+        ? reason.message
+        : 'No se pudo obtener tu ubicación. Inténtalo de nuevo.');
+    } finally {
+      setNearbyLoading(false);
+    }
+  }, [nearbyRadius, sessionToken]);
+
+  async function signOut() {
+    const token = sessionToken;
+    let logoutMessage = '';
+    try {
+      const response = await fetch(`${API_BASE_URL}/auth/logout`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!response.ok && response.status !== 401) {
+        logoutMessage = 'Se cerró la sesión en este dispositivo, pero no se pudo revocar en el servidor.';
+      }
+    } catch {
+      logoutMessage = 'Se cerró la sesión en este dispositivo; no se pudo contactar al servidor.';
+    }
+    await SecureStore.deleteItemAsync('authToken');
+    setSessionToken(null);
+    setSessionUser(null);
+    setNearbyPlaces([]);
+    setNearbyHasSearched(false);
+    setNearbyError('');
+    setSignOutError(logoutMessage);
+  }
 
   const cityNames = useMemo(
     () => new Map(cities.map((city) => [city.id, city.name])),
@@ -167,18 +335,48 @@ export default function App() {
   const visiblePlaces = places.filter((place) =>
     normalize(`${place.name} ${place.address ?? ''} ${place.description ?? ''} ${cityNames.get(place.city_id) ?? ''}`).includes(query)
   );
+  const visibleNearby = nearbyPlaces.filter((place) =>
+    normalize(`${place.name} ${place.address ?? ''} ${place.description ?? ''} ${place.city_name ?? ''} ${place.category_name ?? ''}`).includes(query)
+  );
   const visibleCategories = categories.filter((category) =>
     normalize(`${category.name} ${category.slug} ${category.description ?? ''}`).includes(query)
   );
 
   const selectedTab = TABS.find((tab) => tab.id === activeTab) ?? TABS[0];
-  const count = activeTab === 'cities'
-    ? visibleCities.length
-    : activeTab === 'places'
-      ? visiblePlaces.length
-      : visibleCategories.length;
+  const count = activeTab === 'nearby'
+    ? visibleNearby.length
+    : activeTab === 'cities'
+      ? visibleCities.length
+      : activeTab === 'places'
+        ? visiblePlaces.length
+        : visibleCategories.length;
 
   function renderItems() {
+    if (activeTab === 'nearby') {
+      return visibleNearby.map((place) => {
+        const distance = place.distance_km === null || place.distance_km === undefined
+          ? NaN
+          : Number(place.distance_km);
+        const distanceLabel = Number.isFinite(distance)
+          ? `${distance.toLocaleString('es', { maximumFractionDigits: 1 })} km`
+          : '';
+        return (
+          <View key={place.id} style={styles.card}>
+            <View style={styles.cardTopRow}>
+              <Text style={styles.cardEyebrow}>{place.category_name ?? 'LUGAR DE INTERÉS'}</Text>
+              <Text style={styles.distance}>{distanceLabel}</Text>
+            </View>
+            <Text style={styles.cardTitle}>{place.name}</Text>
+            <Text style={styles.cardSubtitle}>
+              {place.city_name ?? cityNames.get(place.city_id) ?? `Ciudad #${place.city_id}`}
+              {place.address ? ` · ${place.address}` : ''}
+            </Text>
+            {place.description ? <Text style={styles.cardDescription}>{place.description}</Text> : null}
+          </View>
+        );
+      });
+    }
+
     if (activeTab === 'cities') {
       return visibleCities.map((city) => (
         <View key={city.id} style={styles.card}>
@@ -227,6 +425,26 @@ export default function App() {
     ));
   }
 
+  if (sessionLoading) {
+    return (
+      <SafeAreaView style={styles.safeArea}>
+        <View style={styles.loading}>
+          <ActivityIndicator color="#187B67" size="large" />
+          <Text style={styles.loadingText}>Verificando tu sesión...</Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  if (!sessionToken) {
+    return (
+      <AuthScreen
+        error={signOutError || sessionError}
+        onAuthenticated={acceptSession}
+      />
+    );
+  }
+
   return (
     <SafeAreaView style={styles.safeArea}>
       <StatusBar barStyle="dark-content" />
@@ -245,19 +463,35 @@ export default function App() {
           </View>
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Actualizar información"
-            onPress={() => void loadData()}
-            style={styles.refreshButton}
+            accessibilityLabel={activeTab === 'nearby' ? 'Actualizar lugares cercanos' : 'Actualizar información'}
+            disabled={activeTab === 'nearby' && nearbyLoading}
+            onPress={() => void (activeTab === 'nearby' ? loadNearby() : loadData())}
+            style={[styles.refreshButton, activeTab === 'nearby' && nearbyLoading ? styles.disabledButton : null]}
           >
             <Text style={styles.refreshText}>↻</Text>
           </Pressable>
         </View>
 
+        <View style={styles.accountBar}>
+          <Text style={styles.accountGreeting}>Hola, {sessionUser?.name ?? 'explorador'}</Text>
+          <Pressable
+            accessibilityRole="button"
+            onPress={() => void signOut()}
+            style={styles.signOutButton}
+          >
+            <Text style={styles.signOutText}>Cerrar sesión</Text>
+          </Pressable>
+        </View>
+
         <View style={styles.hero}>
           <Text style={styles.heroEyebrow}>TU GUÍA LOCAL</Text>
-          <Text style={styles.heroTitle}>Descubre algo nuevo.</Text>
+          <Text style={styles.heroTitle}>
+            {activeTab === 'nearby' ? 'Descubre lo que tienes cerca.' : 'Descubre algo nuevo.'}
+          </Text>
           <Text style={styles.heroCopy}>
-            Explora ciudades y encuentra lugares para conocer.
+            {activeTab === 'nearby'
+              ? 'Encuentra sitios de interés a tu alrededor.'
+              : 'Explora ciudades y encuentra lugares para conocer.'}
           </Text>
           <View style={styles.apiBadge}>
             <View style={[styles.apiDot, error ? styles.apiDotError : null]} />
@@ -294,6 +528,48 @@ export default function App() {
           ))}
         </View>
 
+        {activeTab === 'nearby' ? (
+          <View style={styles.nearbyControls}>
+            <Text style={styles.radiusLabel}>Buscar en un radio de</Text>
+            <View style={styles.radiusOptions}>
+              {NEARBY_RADII.map((radius) => (
+                <Pressable
+                  key={radius}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: nearbyRadius === radius }}
+                  disabled={nearbyLoading}
+                  onPress={() => {
+                    setNearbyRadius(radius);
+                    setNearbyHasSearched(false);
+                    setNearbyPlaces([]);
+                    setNearbyError('');
+                  }}
+                  style={[styles.radiusChip, nearbyRadius === radius ? styles.radiusChipActive : null]}
+                >
+                  <Text style={[styles.radiusText, nearbyRadius === radius ? styles.radiusTextActive : null]}>
+                    {radius} km
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+            <Pressable
+              accessibilityRole="button"
+              disabled={nearbyLoading}
+              onPress={() => void loadNearby()}
+              style={[styles.nearbyButton, nearbyLoading ? styles.disabledButton : null]}
+            >
+              {nearbyLoading
+                ? <ActivityIndicator color="#FFFFFF" />
+                : <Text style={styles.nearbyButtonText}>
+                    {nearbyHasSearched ? 'Actualizar lugares cercanos' : 'Buscar lugares cercanos'}
+                  </Text>}
+            </Pressable>
+            <Text style={styles.locationNote}>
+              Usamos tu ubicación solo para esta búsqueda; no se guarda.
+            </Text>
+          </View>
+        ) : null}
+
         <View style={styles.sectionHeading}>
           <View>
             <Text style={styles.sectionTitle}>{selectedTab.label}</Text>
@@ -314,6 +590,20 @@ export default function App() {
           </View>
         ) : null}
 
+        {activeTab === 'nearby' && nearbyError ? (
+          <View style={styles.errorBox} accessibilityRole="alert">
+            <Text style={styles.errorTitle}>No se encontraron lugares cercanos</Text>
+            <Text style={styles.errorText}>{nearbyError}</Text>
+          </View>
+        ) : null}
+
+        {activeTab === 'nearby' && nearbyLoading ? (
+          <View style={styles.loading}>
+            <ActivityIndicator color="#187B67" size="large" />
+            <Text style={styles.loadingText}>Buscando lugares cerca de ti...</Text>
+          </View>
+        ) : null}
+
         {loading ? (
           <View style={styles.loading}>
             <ActivityIndicator color="#187B67" size="large" />
@@ -322,15 +612,26 @@ export default function App() {
         ) : (
           <View style={styles.list}>
             {renderItems()}
-            {count === 0 && !error ? (
+            {count === 0 && !error &&
+              (activeTab !== 'nearby' || (!nearbyError && !nearbyLoading)) ? (
               <View style={styles.emptyState}>
                 <Text style={styles.emptyIcon}>⌖</Text>
                 <Text style={styles.emptyTitle}>
-                  {search ? 'No encontramos resultados' : 'Todavía no hay contenido'}
+                  {search
+                    ? 'No encontramos resultados'
+                    : activeTab === 'nearby' && !nearbyHasSearched
+                      ? 'Busca sitios cerca de ti'
+                      : activeTab === 'nearby'
+                        ? 'No hay lugares en este radio'
+                        : 'Todavía no hay contenido'}
                 </Text>
                 <Text style={styles.emptyText}>
                   {search
                     ? 'Prueba con otra búsqueda.'
+                    : activeTab === 'nearby' && !nearbyHasSearched
+                      ? 'Pulsa “Buscar lugares cercanos” y permite el acceso a tu ubicación.'
+                      : activeTab === 'nearby'
+                        ? 'Prueba con un radio más amplio o inténtalo en otra zona.'
                     : 'Cuando se agreguen datos, aparecerán aquí.'}
                 </Text>
               </View>
@@ -358,6 +659,32 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     marginBottom: 26,
+  },
+  accountBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#E8EEE7',
+    borderRadius: 13,
+    paddingHorizontal: 13,
+    paddingVertical: 10,
+    marginTop: -13,
+    marginBottom: 18,
+  },
+  accountGreeting: {
+    color: '#183B32',
+    fontSize: 13,
+    fontWeight: '700',
+    flexShrink: 1,
+  },
+  signOutButton: {
+    paddingVertical: 4,
+    paddingLeft: 10,
+  },
+  signOutText: {
+    color: '#176F5D',
+    fontSize: 12,
+    fontWeight: '700',
   },
   brandMark: {
     width: 42,
@@ -469,6 +796,66 @@ const styles = StyleSheet.create({
     padding: 4,
     marginBottom: 24,
   },
+  nearbyControls: {
+    backgroundColor: '#FFFFFF',
+    borderColor: '#E4EAE1',
+    borderWidth: 1,
+    borderRadius: 18,
+    padding: 15,
+    marginTop: -9,
+    marginBottom: 22,
+  },
+  radiusLabel: {
+    color: '#53645A',
+    fontSize: 12,
+    fontWeight: '700',
+    marginBottom: 10,
+  },
+  radiusOptions: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 14,
+  },
+  radiusChip: {
+    backgroundColor: '#F1F4EF',
+    borderRadius: 12,
+    paddingHorizontal: 9,
+    paddingVertical: 8,
+  },
+  radiusChipActive: {
+    backgroundColor: '#DDEFE6',
+  },
+  radiusText: {
+    color: '#66766D',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  radiusTextActive: {
+    color: '#176F5D',
+    fontWeight: '800',
+  },
+  nearbyButton: {
+    minHeight: 46,
+    borderRadius: 13,
+    backgroundColor: '#176F5D',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  nearbyButtonText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  disabledButton: {
+    opacity: 0.7,
+  },
+  locationNote: {
+    color: '#87938B',
+    fontSize: 10,
+    lineHeight: 15,
+    textAlign: 'center',
+    marginTop: 9,
+  },
   tab: {
     flex: 1,
     alignItems: 'center',
@@ -535,6 +922,11 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: '800',
     letterSpacing: 1,
+  },
+  distance: {
+    color: '#176F5D',
+    fontSize: 11,
+    fontWeight: '700',
   },
   cardId: {
     color: '#A0AAA3',

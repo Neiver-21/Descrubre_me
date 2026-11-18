@@ -48,6 +48,11 @@ La base PostgreSQL local no se copia automáticamente a Railway. Las migraciones
 
 Todos los recursos admiten `GET /`, `GET /:id`, `POST /`, `PATCH /:id` y `DELETE /:id`:
 
+- `/api/v1/auth/register`: crea una cuenta con `name`, `email` y `password` (mínimo 8 caracteres).
+- `/api/v1/auth/login`: inicia sesión con `email` y `password`.
+- `/api/v1/auth/me`: devuelve la cuenta de la sesión actual.
+- `/api/v1/auth/logout`: revoca la sesión actual.
+- `POST /api/v1/places/nearby`: busca lugares cercanos; requiere `Authorization: Bearer <token>` y acepta `latitude`, `longitude` y `radius_km` (1–50, predeterminado 10) en JSON. Las coordenadas no aparecen en la URL.
 - `/api/v1/cities`: `name`, `country`; opcionales `region`, `description`.
 - `/api/v1/categories`: `name`, `slug`; opcional `description`.
 - `/api/v1/places`: `city_id`, `name`; opcionales `category_id`, `description`, `address`, `latitude`, `longitude`, `image_url`, `website_url`. Se puede filtrar con `city_id` y `category_id`.
@@ -56,7 +61,11 @@ Todos los recursos admiten `GET /`, `GET /:id`, `POST /`, `PATCH /:id` y `DELETE
 
 Las listas aceptan `limit` (1–100, predeterminado 50) y `offset` (predeterminado 0). Los cuerpos de escritura son JSON. Las relaciones impiden borrar una ciudad con lugares o eventos asociados; las categorías borradas dejan los lugares sin categoría.
 
-Las lecturas son públicas. `POST`, `PATCH` y `DELETE` requieren el encabezado `x-admin-key` con el valor configurado en `ADMIN_API_KEY`. Si la clave no está configurada, las escrituras quedan bloqueadas. No incluyas esa clave en código JavaScript ni en una aplicación pública de navegador; solo debe usarla un servicio administrativo de confianza.
+Las lecturas generales son públicas. El registro y el inicio de sesión crean sesiones de 30 días; el servidor guarda contraseñas con scrypt y solo almacena hashes de los tokens de sesión. El APK conserva el token en el almacenamiento seguro del dispositivo. La búsqueda de lugares cercanos requiere una sesión y solo utiliza las coordenadas enviadas para esa consulta; no las almacena.
+
+`POST`, `PATCH` y `DELETE` de ciudades, categorías, lugares y eventos requieren el encabezado `x-admin-key` con el valor configurado en `ADMIN_API_KEY`. Si la clave no está configurada, las escrituras quedan bloqueadas. No incluyas esa clave en código JavaScript ni en una aplicación pública de navegador; solo debe usarla un servicio administrativo de confianza.
+
+Para que un lugar aparezca en la búsqueda de cercanía, debe tener `latitude` y `longitude` configuradas. Se devuelven hasta 100 lugares dentro del radio elegido, ordenados por distancia.
 
 Ejemplo para crear una ciudad:
 
@@ -71,7 +80,9 @@ Ejemplo para crear una ciudad:
 
 ## App Android
 
-La app Expo de solo lectura está en `mobile/` y consume la API pública de Railway. Para probarla, desde esa carpeta ejecuta:
+La app Expo está en `mobile/`, consume la API de Railway y ofrece registro, inicio de sesión y búsqueda de lugares usando la ubicación en primer plano del dispositivo. La persona puede elegir un radio de 1, 5, 10, 25 o 50 km; el radio inicial es 10 km. Si niega el permiso de ubicación, puede seguir usando las listas de ciudades, lugares y categorías.
+
+Para probarla, desde esa carpeta ejecuta:
 
 ```bash
 npm install

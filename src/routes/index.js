@@ -1,7 +1,15 @@
 const express = require('express');
+const db = require('../config/db');
+const requireUser = require('../middleware/requireUser')(db);
+const authRoutes = require('./auth');
 const createCrudRouter = require('./crud');
+const createNearbyHandler = require('./nearby');
 
 const router = express.Router();
+
+router.use('/auth', authRoutes);
+
+router.post('/places/nearby', requireUser, createNearbyHandler(db));
 
 router.use('/cities', createCrudRouter({
   table: 'cities',

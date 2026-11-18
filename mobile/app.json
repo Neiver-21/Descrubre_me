@@ -6,6 +6,15 @@
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
+    "plugins": [
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Tu ubicación se usa para mostrar lugares de interés cerca de ti."
+        }
+      ],
+      "expo-secure-store"
+    ],
     "ios": {
       "supportsTablet": true
     },
