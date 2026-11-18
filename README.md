@@ -86,3 +86,5 @@ npm run build:apk
 ```
 
 El perfil `preview` genera un APK de instalación directa. EAS muestra el enlace de descarga cuando finaliza la compilación. La app solo hace lecturas públicas; no contiene `ADMIN_API_KEY`.
+
+Cada cambio en `mobile/` en la rama `main` también inicia una compilación de APK en GitHub Actions. Cuando finalice, abre el resultado de **Build Android APK** en la pestaña **Actions** del repositorio y descarga el artefacto `descubremiciudad-apk`.
