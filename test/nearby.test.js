@@ -13,7 +13,7 @@ async function invokeNearby(query, database) {
   let nextError;
 
   await createNearbyHandler(database)(
-    { body: query },
+    { body: query, user: { id: 42 } },
     response,
     (error) => {
       nextError = error;
@@ -37,8 +37,9 @@ test('nearby search validates coordinates and uses the default radius', async ()
   }, database);
 
   assert.equal(nextError, undefined);
-  assert.deepEqual(queryArguments.values, [4.711, -74.072, 10]);
+  assert.deepEqual(queryArguments.values, [4.711, -74.072, 10, 42]);
   assert.match(queryArguments.sql, /latitude IS NOT NULL AND p\.longitude IS NOT NULL/);
+  assert.match(queryArguments.sql, /user_category_preferences/);
   assert.deepEqual(response.body, {
     status: 'success',
     data: [{ id: 8, name: 'Parque Central', distance_km: 2.4 }],

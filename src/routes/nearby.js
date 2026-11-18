@@ -48,13 +48,23 @@ function createNearbyHandler(database = db) {
            JOIN cities c ON c.id = p.city_id
            LEFT JOIN categories cat ON cat.id = p.category_id
            WHERE p.latitude IS NOT NULL AND p.longitude IS NOT NULL
+             AND (
+               NOT EXISTS (
+                 SELECT 1 FROM user_category_preferences
+                 WHERE user_id = $4
+               )
+               OR p.category_id IN (
+                 SELECT category_id FROM user_category_preferences
+                 WHERE user_id = $4
+               )
+             )
          )
          SELECT *, ROUND(raw_distance_km::numeric, 1)::double precision AS distance_km
          FROM distances
          WHERE raw_distance_km <= $3
          ORDER BY raw_distance_km ASC, id ASC
          LIMIT 100`,
-        [latitude, longitude, radiusKm]
+        [latitude, longitude, radiusKm, req.user.id]
       );
 
       return res.json({

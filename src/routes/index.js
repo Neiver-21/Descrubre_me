@@ -4,10 +4,12 @@ const requireUser = require('../middleware/requireUser')(db);
 const authRoutes = require('./auth');
 const createCrudRouter = require('./crud');
 const createNearbyHandler = require('./nearby');
+const createPreferencesRouter = require('./preferences');
 
 const router = express.Router();
 
 router.use('/auth', authRoutes);
+router.use('/auth/preferences', requireUser, createPreferencesRouter(db));
 
 router.post('/places/nearby', requireUser, createNearbyHandler(db));
 
@@ -43,7 +45,8 @@ router.use('/places', createCrudRouter({
     latitude: { type: 'number', min: -90, max: 90, nullable: true },
     longitude: { type: 'number', min: -180, max: 180, nullable: true },
     image_url: { type: 'string', nullable: true },
-    website_url: { type: 'string', nullable: true }
+    website_url: { type: 'string', nullable: true },
+    source_url: { type: 'string', nullable: true }
   },
   requiredFields: ['city_id', 'name'],
   filters: { city_id: 'integer', category_id: 'integer' }

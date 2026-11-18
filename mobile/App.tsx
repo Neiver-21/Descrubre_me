@@ -2,7 +2,9 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import * as Location from 'expo-location';
 import * as SecureStore from 'expo-secure-store';
 import {
+  Alert,
   ActivityIndicator,
+  Linking,
   Pressable,
   SafeAreaView,
   ScrollView,
@@ -35,6 +37,7 @@ type Place = {
   address?: string | null;
   city_name?: string;
   category_name?: string | null;
+  source_url?: string | null;
   distance_km?: number | string | null;
 };
 
@@ -84,6 +87,14 @@ function isCategory(value: unknown): value is Category {
     typeof value.slug === 'string';
 }
 
+function isCategorySelection(value: unknown): value is { category_ids: number[] } {
+  return isRecord(value) &&
+    Array.isArray(value.category_ids) &&
+    value.category_ids.every((id) =>
+      typeof id === 'number' && Number.isSafeInteger(id) && id > 0
+    );
+}
+
 function isAuthUser(value: unknown): value is AuthUser {
   return isRecord(value) &&
     Number.isSafeInteger(value.id) &&
@@ -116,6 +127,19 @@ function normalize(value: string): string {
   return value.trim().toLocaleLowerCase();
 }
 
+function isWikidataUrl(value: string | null | undefined): value is string {
+  return typeof value === 'string' &&
+    /^https:\/\/www\.wikidata\.org\/wiki\/Q\d+$/.test(value);
+}
+
+async function openSource(url: string): Promise<void> {
+  try {
+    await Linking.openURL(url);
+  } catch {
+    Alert.alert('No se pudo abrir la fuente', 'Inténtalo de nuevo más tarde.');
+  }
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabId>('nearby');
   const [search, setSearch] = useState('');
@@ -134,6 +158,10 @@ export default function App() {
   const [nearbyLoading, setNearbyLoading] = useState(false);
   const [nearbyError, setNearbyError] = useState('');
   const [nearbyHasSearched, setNearbyHasSearched] = useState(false);
+  const [preferredCategoryIds, setPreferredCategoryIds] = useState<number[]>([]);
+  const [preferencesLoading, setPreferencesLoading] = useState(true);
+  const [preferencesSaving, setPreferencesSaving] = useState(false);
+  const [preferencesError, setPreferencesError] = useState('');
 
   useEffect(() => {
     let active = true;
@@ -232,11 +260,102 @@ export default function App() {
     setLoading(false);
   }, []);
 
+  const loadPreferences = useCallback(async () => {
+    if (!sessionToken) {
+      return;
+    }
+
+    setPreferencesLoading(true);
+    setPreferencesError('');
+    try {
+      const response = await fetch(`${API_BASE_URL}/auth/preferences`, {
+        headers: { Authorization: `Bearer ${sessionToken}` },
+      });
+      const payload: unknown = await response.json();
+      if (response.status === 401) {
+        await SecureStore.deleteItemAsync('authToken');
+        setSessionToken(null);
+        setSessionUser(null);
+        setSessionError('Tu sesión venció. Inicia sesión nuevamente.');
+        throw new Error('Tu sesión venció. Inicia sesión nuevamente.');
+      }
+      if (!response.ok) {
+        const message = isRecord(payload) && typeof payload.message === 'string'
+          ? payload.message
+          : `El servidor respondió con el código ${response.status}.`;
+        throw new Error(message);
+      }
+      if (!isRecord(payload) || payload.status !== 'success' ||
+          !isCategorySelection(payload.data)) {
+        throw new Error('El servidor devolvió preferencias que la aplicación no reconoce.');
+      }
+      setPreferredCategoryIds(payload.data.category_ids);
+    } catch (reason) {
+      setPreferencesError(reason instanceof Error
+        ? reason.message
+        : 'No se pudieron cargar tus preferencias.');
+    } finally {
+      setPreferencesLoading(false);
+    }
+  }, [sessionToken]);
+
   useEffect(() => {
     if (sessionToken) {
       void loadData();
+      void loadPreferences();
     }
-  }, [loadData, sessionToken]);
+  }, [loadData, loadPreferences, sessionToken]);
+
+  const saveCategoryPreference = useCallback(async (categoryId: number) => {
+    if (!sessionToken || preferencesSaving || preferencesLoading) {
+      return;
+    }
+
+    const categoryIds = preferredCategoryIds.includes(categoryId)
+      ? preferredCategoryIds.filter((id) => id !== categoryId)
+      : [...preferredCategoryIds, categoryId].sort((a, b) => a - b);
+
+    setPreferencesSaving(true);
+    setPreferencesError('');
+    try {
+      const response = await fetch(`${API_BASE_URL}/auth/preferences`, {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${sessionToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ category_ids: categoryIds }),
+      });
+      const payload: unknown = await response.json();
+      if (response.status === 401) {
+        await SecureStore.deleteItemAsync('authToken');
+        setSessionToken(null);
+        setSessionUser(null);
+        setSessionError('Tu sesión venció. Inicia sesión nuevamente.');
+        throw new Error('Tu sesión venció. Inicia sesión nuevamente.');
+      }
+      if (!response.ok) {
+        const message = isRecord(payload) && typeof payload.message === 'string'
+          ? payload.message
+          : `El servidor respondió con el código ${response.status}.`;
+        throw new Error(message);
+      }
+      if (!isRecord(payload) || payload.status !== 'success' ||
+          !isCategorySelection(payload.data)) {
+        throw new Error('El servidor devolvió preferencias que la aplicación no reconoce.');
+      }
+      setPreferredCategoryIds(payload.data.category_ids);
+      setNearbyPlaces([]);
+      setNearbyHasSearched(false);
+      setNearbyError('');
+    } catch (reason) {
+      setPreferencesError(reason instanceof Error
+        ? reason.message
+        : 'No se pudieron guardar tus preferencias.');
+    } finally {
+      setPreferencesSaving(false);
+    }
+  }, [preferredCategoryIds, preferencesLoading, preferencesSaving, sessionToken]);
 
   const loadNearby = useCallback(async () => {
     if (!sessionToken) {
@@ -316,6 +435,8 @@ export default function App() {
     setNearbyPlaces([]);
     setNearbyHasSearched(false);
     setNearbyError('');
+    setPreferredCategoryIds([]);
+    setPreferencesError('');
     setSignOutError(logoutMessage);
   }
 
@@ -354,6 +475,7 @@ export default function App() {
   function renderItems() {
     if (activeTab === 'nearby') {
       return visibleNearby.map((place) => {
+        const sourceUrl = isWikidataUrl(place.source_url) ? place.source_url : null;
         const distance = place.distance_km === null || place.distance_km === undefined
           ? NaN
           : Number(place.distance_km);
@@ -372,6 +494,15 @@ export default function App() {
               {place.address ? ` · ${place.address}` : ''}
             </Text>
             {place.description ? <Text style={styles.cardDescription}>{place.description}</Text> : null}
+            {sourceUrl ? (
+              <Pressable
+                accessibilityRole="link"
+                onPress={() => void openSource(sourceUrl)}
+                style={styles.sourceLink}
+              >
+                <Text style={styles.sourceLinkText}>Fuente: Wikidata (CC0)</Text>
+              </Pressable>
+            ) : null}
           </View>
         );
       });
@@ -552,11 +683,59 @@ export default function App() {
                 </Pressable>
               ))}
             </View>
+            <Text style={styles.preferenceTitle}>¿Qué te interesa?</Text>
+            {preferencesLoading ? (
+              <ActivityIndicator color="#187B67" size="small" style={styles.preferenceLoading} />
+            ) : (
+              <View style={styles.preferenceOptions}>
+                {categories.map((category) => {
+                  const selected = preferredCategoryIds.includes(category.id);
+                  return (
+                    <Pressable
+                      key={category.id}
+                      accessibilityRole="button"
+                      accessibilityState={{ selected, disabled: preferencesSaving }}
+                      disabled={preferencesSaving}
+                      onPress={() => void saveCategoryPreference(category.id)}
+                      style={[
+                        styles.preferenceChip,
+                        selected ? styles.preferenceChipActive : null,
+                        preferencesSaving ? styles.disabledButton : null,
+                      ]}
+                    >
+                      <Text style={[
+                        styles.preferenceText,
+                        selected ? styles.preferenceTextActive : null,
+                      ]}>
+                        {category.name}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            )}
+            <Text style={styles.preferenceNote}>
+              Se guardan en tu cuenta y filtran los lugares cercanos. Si no eliges ninguna, verás todas las categorías.
+            </Text>
+            {preferencesSaving ? (
+              <Text style={styles.preferenceStatus}>Guardando tus preferencias...</Text>
+            ) : null}
+            {preferencesError ? (
+              <View accessibilityRole="alert">
+                <Text style={styles.preferencesError}>{preferencesError}</Text>
+                <Pressable onPress={() => void loadPreferences()} style={styles.retryButton}>
+                  <Text style={styles.retryText}>Volver a cargar</Text>
+                </Pressable>
+              </View>
+            ) : null}
             <Pressable
               accessibilityRole="button"
-              disabled={nearbyLoading}
+              disabled={nearbyLoading || preferencesSaving}
               onPress={() => void loadNearby()}
-              style={[styles.nearbyButton, nearbyLoading ? styles.disabledButton : null]}
+              style={[
+                styles.nearbyButton,
+                nearbyLoading || preferencesSaving ? styles.disabledButton : null,
+              ]}
             >
               {nearbyLoading
                 ? <ActivityIndicator color="#FFFFFF" />
@@ -816,6 +995,58 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     marginBottom: 14,
   },
+  preferenceTitle: {
+    color: '#53645A',
+    fontSize: 12,
+    fontWeight: '700',
+    marginBottom: 8,
+  },
+  preferenceLoading: {
+    alignSelf: 'flex-start',
+    marginVertical: 8,
+  },
+  preferenceOptions: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    marginBottom: 4,
+  },
+  preferenceChip: {
+    backgroundColor: '#F1F4EF',
+    borderRadius: 12,
+    marginRight: 7,
+    marginBottom: 7,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  preferenceChipActive: {
+    backgroundColor: '#DDEFE6',
+  },
+  preferenceText: {
+    color: '#66766D',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  preferenceTextActive: {
+    color: '#176F5D',
+    fontWeight: '800',
+  },
+  preferenceNote: {
+    color: '#87938B',
+    fontSize: 10,
+    lineHeight: 15,
+    marginBottom: 8,
+  },
+  preferenceStatus: {
+    color: '#176F5D',
+    fontSize: 11,
+    marginBottom: 8,
+  },
+  preferencesError: {
+    color: '#A13B37',
+    fontSize: 11,
+    lineHeight: 16,
+    marginBottom: 4,
+  },
   radiusChip: {
     backgroundColor: '#F1F4EF',
     borderRadius: 12,
@@ -855,6 +1086,16 @@ const styles = StyleSheet.create({
     lineHeight: 15,
     textAlign: 'center',
     marginTop: 9,
+  },
+  sourceLink: {
+    alignSelf: 'flex-start',
+    marginTop: 10,
+  },
+  sourceLinkText: {
+    color: '#176F5D',
+    fontSize: 11,
+    fontWeight: '600',
+    textDecorationLine: 'underline',
   },
   tab: {
     flex: 1,

@@ -52,16 +52,17 @@ Todos los recursos admiten `GET /`, `GET /:id`, `POST /`, `PATCH /:id` y `DELETE
 - `/api/v1/auth/login`: inicia sesión con `email` y `password`.
 - `/api/v1/auth/me`: devuelve la cuenta de la sesión actual.
 - `/api/v1/auth/logout`: revoca la sesión actual.
+- `/api/v1/auth/preferences`: `GET` devuelve las categorías preferidas y `PUT` reemplaza la selección con `{ "category_ids": [1, 2] }`. Una lista vacía muestra todas las categorías.
 - `POST /api/v1/places/nearby`: busca lugares cercanos; requiere `Authorization: Bearer <token>` y acepta `latitude`, `longitude` y `radius_km` (1–50, predeterminado 10) en JSON. Las coordenadas no aparecen en la URL.
 - `/api/v1/cities`: `name`, `country`; opcionales `region`, `description`.
 - `/api/v1/categories`: `name`, `slug`; opcional `description`.
-- `/api/v1/places`: `city_id`, `name`; opcionales `category_id`, `description`, `address`, `latitude`, `longitude`, `image_url`, `website_url`. Se puede filtrar con `city_id` y `category_id`.
+- `/api/v1/places`: `city_id`, `name`; opcionales `category_id`, `description`, `address`, `latitude`, `longitude`, `image_url`, `website_url`, `source_url`. Se puede filtrar con `city_id` y `category_id`.
 - `/api/v1/events`: `city_id`, `title`, `starts_at`; opcionales `description`, `location`, `ends_at`, `image_url`, `ticket_url`. Se puede filtrar con `city_id`.
 - `/api/v1/health`: comprueba que la API puede consultar PostgreSQL.
 
 Las listas aceptan `limit` (1–100, predeterminado 50) y `offset` (predeterminado 0). Los cuerpos de escritura son JSON. Las relaciones impiden borrar una ciudad con lugares o eventos asociados; las categorías borradas dejan los lugares sin categoría.
 
-Las lecturas generales son públicas. El registro y el inicio de sesión crean sesiones de 30 días; el servidor guarda contraseñas con scrypt y solo almacena hashes de los tokens de sesión. El APK conserva el token en el almacenamiento seguro del dispositivo. La búsqueda de lugares cercanos requiere una sesión y solo utiliza las coordenadas enviadas para esa consulta; no las almacena.
+Las lecturas generales son públicas. El registro y el inicio de sesión crean sesiones de 30 días; el servidor guarda contraseñas con scrypt y solo almacena hashes de los tokens de sesión. El APK conserva el token en el almacenamiento seguro del dispositivo. La búsqueda de lugares cercanos requiere una sesión, aplica las categorías guardadas en la cuenta y solo utiliza las coordenadas enviadas para esa consulta; no las almacena.
 
 `POST`, `PATCH` y `DELETE` de ciudades, categorías, lugares y eventos requieren el encabezado `x-admin-key` con el valor configurado en `ADMIN_API_KEY`. Si la clave no está configurada, las escrituras quedan bloqueadas. No incluyas esa clave en código JavaScript ni en una aplicación pública de navegador; solo debe usarla un servicio administrativo de confianza.
 
@@ -82,6 +83,8 @@ Ejemplo para crear una ciudad:
 
 La app Expo está en `mobile/`, consume la API de Railway y ofrece registro, inicio de sesión y búsqueda de lugares usando la ubicación en primer plano del dispositivo. La persona puede elegir un radio de 1, 5, 10, 25 o 50 km; el radio inicial es 10 km. Si niega el permiso de ubicación, puede seguir usando las listas de ciudades, lugares y categorías.
 
+La migración `003_preferences_and_cali_places.sql` agrega cinco categorías y 43 sitios de interés de Cali con coordenadas. Los nombres y coordenadas se consultaron en Wikidata, cuyos datos están publicados bajo [CC0](https://www.wikidata.org/wiki/Wikidata:Licensing); cada lugar conserva un enlace a su registro fuente y la app lo muestra en la ficha. Las preferencias se guardan por cuenta y filtran la búsqueda de lugares cercanos.
+
 Para probarla, desde esa carpeta ejecuta:
 
 ```bash
@@ -96,6 +99,6 @@ npx eas-cli login
 npm run build:apk
 ```
 
-El perfil `preview` genera un APK de instalación directa. EAS muestra el enlace de descarga cuando finaliza la compilación. La app solo hace lecturas públicas; no contiene `ADMIN_API_KEY`.
+El perfil `preview` genera un APK de instalación directa. EAS muestra el enlace de descarga cuando finaliza la compilación. La app consulta recursos públicos y guarda las preferencias privadas mediante la sesión de la persona usuaria; no contiene `ADMIN_API_KEY`.
 
 Cada cambio en `mobile/` en la rama `main` también inicia una compilación de APK en GitHub Actions. Cuando finalice, abre el resultado de **Build Android APK** en la pestaña **Actions** del repositorio y descarga el artefacto `descubremiciudad-apk`.
