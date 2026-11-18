@@ -68,3 +68,21 @@ Ejemplo para crear una ciudad:
   "description": "Ciudad de la eterna primavera"
 }
 ```
+
+## App Android
+
+La app Expo de solo lectura está en `mobile/` y consume la API pública de Railway. Para probarla, desde esa carpeta ejecuta:
+
+```bash
+npm install
+npx expo start
+```
+
+Para generar un APK de prueba se necesita una cuenta de Expo/EAS. Desde `mobile/`, ejecuta:
+
+```bash
+npx eas-cli login
+npm run build:apk
+```
+
+El perfil `preview` genera un APK de instalación directa. EAS muestra el enlace de descarga cuando finaliza la compilación. La app solo hace lecturas públicas; no contiene `ADMIN_API_KEY`.
